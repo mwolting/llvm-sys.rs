@@ -16,6 +16,8 @@ build = "build.rs"
 
 [features]
 strict-versioning = []
+force-dynamic-linking = []
+force-static-linking = []
 
 [dependencies]
 bitflags = "0.7"

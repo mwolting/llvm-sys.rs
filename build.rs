@@ -158,7 +158,7 @@ fn is_compatible_llvm(llvm_version: &Version) -> bool {
 ///
 /// Lazily searches for or compiles LLVM as configured by the environment
 /// variables.
-fn llvm_config(arg: &str) -> String {
+fn llvm_config<S: AsRef<str>>(arg: S) -> String {
     llvm_config_ex(&*LLVM_CONFIG_PATH, arg)
         .expect("Surprising failure from llvm-config")
 }
@@ -167,10 +167,11 @@ fn llvm_config(arg: &str) -> String {
 ///
 /// Explicit version of the `llvm_config` function that bubbles errors
 /// up.
-fn llvm_config_ex<S: AsRef<OsStr>>(binary: S, arg: &str)
+fn llvm_config_ex<S: AsRef<OsStr>, T: AsRef<str>>(binary: S, arg: T)
         -> io::Result<String> {
+    let args: Vec<&str> = arg.as_ref().split(' ').collect();
     Command::new(binary)
-        .arg(arg)
+        .args(args.as_ref())
         .output()
         .map(|output| String::from_utf8(output.stdout)
             .expect("Output from llvm-config was not valid UTF-8"))
@@ -203,17 +204,35 @@ fn lib_name(name: &str) -> &str {
     &name[2..]
 }
 
-fn add_lib(kind: &'static str, name: &str) {
-    println!("cargo:rustc-link-lib={}={}", kind, name);
+fn add_lib<S: AsRef<str>>(kind: &'static str, name: S) {
+    println!("cargo:rustc-link-lib={}={}", kind, name.as_ref());
 }
 
-fn add_libs(kind: &'static str, flag: &'static str) {
+fn add_libs<S: AsRef<str>>(kind: &'static str, flag: S) {
     for name in llvm_config(flag).split_whitespace().map(lib_name) {
         add_lib(kind, name);
     }
 }
 
 fn main() {
+    let (lib_type, link_mode_flag) = if env::var("CARGO_FEATURE_FORCE_DYNAMIC_LINKING").is_ok() {
+        if env::var("CARGO_FEATURE_FORCE_STATIC_LINKING").is_ok() {
+            panic!("Features force-dynamic-linking and force-static-linking are mutually exclusive");
+        }
+        ("dylib", "--link-shared")
+    } else if env::var("CARGO_FEATURE_FORCE_STATIC_LINKING").is_ok() {
+        ("static", "--link-static")
+    } else {
+        match llvm_config("--shared-mode").trim() {
+            "shared" => ("dylib", "--link-shared"),
+            "static" => ("static", "--link-static"),
+            mode => {
+                println!("cargo:warning=Unrecognized result from 'llvm-config --shared-mode': '{}'. Static linking is assumed", mode);
+                ("static", "--link-static")
+            },
+        }
+    };
+
     add_libs("dylib", "--system-libs");
 
     println!("cargo:rustc-link-search=native={}", llvm_config("--libdir"));
@@ -221,9 +240,9 @@ fn main() {
     if cfg!(target_env = "msvc") {
         // --libs returns absolute paths when
         // LLVM was built on Windows with MSVC
-        add_libs("static", "--libnames");
+        add_libs(lib_type, format!("{} --libnames", link_mode_flag));
     } else {
-        add_libs("static", "--libs");
+        add_libs(lib_type, format!("{} --libs", link_mode_flag));
         // Determine which C++ standard library to use: LLVM's or GCC's.
         // This breaks the link step on Windows with MSVC.
         add_lib("dylib", if llvm_config("--cxxflags").contains("stdlib=libc++") {
